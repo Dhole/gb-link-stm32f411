@@ -29,6 +29,11 @@
 
 #include "usart.h"
 
+#define MODE_SNIFF 's'
+#define MODE_SLAVE 'b'
+#define SLAVE_PRINTER 'p'
+
+
 /* STM32F411-Nucleo at 96 MHz */
 const struct rcc_clock_scale rcc_hse_8mhz_3v3_96mhz = {
 	.pllm = 8,
@@ -40,7 +45,7 @@ const struct rcc_clock_scale rcc_hse_8mhz_3v3_96mhz = {
 	.ppre1 = RCC_CFGR_PPRE_DIV_2,
 	.ppre2 = RCC_CFGR_PPRE_DIV_NONE,
 	.power_save = 1,
-	.flash_config = FLASH_ACR_ICE | FLASH_ACR_DCE |
+	.flash_config = FLASH_ACR_ICEN | FLASH_ACR_DCEN |
 		FLASH_ACR_LATENCY_3WS,
 	.ahb_frequency  = 96000000,
 	.apb1_frequency = 48000000,
@@ -171,6 +176,7 @@ gblink_slave_gpio_setup(void)
 }
 
 volatile uint8_t mode;
+volatile uint8_t slave_mode;
 
 volatile uint8_t gb_sin, gb_sout;
 volatile uint8_t gb_bit;
@@ -180,6 +186,33 @@ uint8_t recv_buf[RECV_BUF_LEN];
 volatile uint32_t recv_buf_head;
 volatile uint32_t recv_buf_tail;
 
+static inline void
+RECV_BUF_PUSH(uint8_t b) {
+	recv_buf[recv_buf_head] = b;
+	recv_buf_head = (recv_buf_head + 1) % RECV_BUF_LEN;
+}
+
+static inline uint8_t
+RECV_BUF_POP(void)
+{
+	uint8_t b = recv_buf[recv_buf_tail];
+	recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
+	return b;
+}
+
+static inline void
+RECV_BUF_CLEAR(void)
+{
+	recv_buf_head = 1;
+	recv_buf_tail = 0;
+}
+
+static inline int
+RECV_BUF_EMPTY(void)
+{
+	return (recv_buf_tail == recv_buf_head);
+}
+
 void
 usart2_isr(void)
 {
@@ -187,16 +220,89 @@ usart2_isr(void)
 	/* Check if we were called because of RXNE. */
 	if (((USART_CR1(USART2) & USART_CR1_RXNEIE) != 0) &&
 	    ((USART_SR(USART2) & USART_SR_RXNE) != 0)) {
-		empty = recv_buf_tail == recv_buf_head ? 1 : 0;
+		//empty = recv_buf_tail == recv_buf_head ? 1 : 0;
+		empty = RECV_BUF_EMPTY();
 
-		recv_buf[recv_buf_head] = usart_recv(USART2);
-		recv_buf_head = (recv_buf_head + 1) % RECV_BUF_LEN;
+		//recv_buf[recv_buf_head] = usart_recv(USART2);
+		//recv_buf_head = (recv_buf_head + 1) % RECV_BUF_LEN;
+		RECV_BUF_PUSH(usart_recv(USART2));
 
 		if (empty && gb_bit == 0 ) {
-			gb_sin = recv_buf[recv_buf_tail];
+			//gb_sin = recv_buf[recv_buf_tail];
 			//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
+			gb_sin = RECV_BUF_POP();
 		}
 	}
+}
+
+const char printer_magic[] = {0x88, 0x33};
+
+enum printer_state {MAGIC0, MAGIC1, CMD, ARG0, LEN_LOW, LEN_HIGH, DATA, CHECKSUM0, CHECKSUM1, ACK, STATUS};
+enum printer_state printer_state;
+uint16_t printer_data_len;
+
+
+static void
+printer_update_state(uint8_t b)
+{
+	switch (printer_state) {
+	case MAGIC0:
+		if (b == printer_magic[0]) {
+			printer_state = MAGIC1;
+		}
+		break;
+	case MAGIC1:
+		if (b == printer_magic[1]) {
+			printer_state = CMD;
+		} else {
+			printer_state = MAGIC0;
+		}
+		break;
+	case CMD:
+		printer_state = ARG0;
+		break;
+	case ARG0:
+		printer_state = LEN_LOW;
+		break;
+	case LEN_LOW:
+		printer_data_len = b;
+		printer_state = LEN_HIGH;
+		break;
+	case LEN_HIGH:
+		printer_data_len |= b << 8;
+		if (printer_data_len != 0) {
+			printer_state = DATA;
+		} else {
+			printer_state = CHECKSUM0;
+		}
+		break;
+	case DATA:
+		printer_data_len--;
+		printer_state = (printer_data_len == 0) ? CHECKSUM0 : DATA;
+		break;
+	case CHECKSUM0:
+		printer_state = CHECKSUM1;
+		break;
+	case CHECKSUM1:
+		RECV_BUF_PUSH(0x81);
+		printer_state = ACK;
+		break;
+	case ACK:
+		RECV_BUF_PUSH(0x00);
+		printer_state = STATUS;
+		break;
+	case STATUS:
+		printer_state = MAGIC0;
+		gpio_toggle(GPIOA, GPIO5); /* LED on/off */
+		break;
+	}
+}
+
+static void
+printer_reset_state(void)
+{
+	printer_data_len = 0;
+	printer_state = MAGIC0;
 }
 
 inline static void
@@ -233,20 +339,30 @@ exti0_isr_slave(void)
 			// Send gb_sin and gb_sout over USART2
 			usart_send_blocking(USART2, gb_sout);
 
+			switch(slave_mode) {
+			case SLAVE_PRINTER:
+				printer_update_state(gb_sout);
+				break;
+			default:
+				break;
+			}
+
 			// Reset state
 			gb_bit = 0;
 			gb_sout = 0;
 
 			// Prepare next gb_sin
-			if (recv_buf_tail == recv_buf_head) {
+			//if (recv_buf_tail == recv_buf_head) {
+			if (RECV_BUF_EMPTY()) {
 				gb_sin = 0x00;
 			} else {
-				recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
-				if (recv_buf_tail != recv_buf_head) {
-					gb_sin = recv_buf[recv_buf_tail];
-				} else {
-					gb_sin = 0x00;
-				}
+				gb_sin = RECV_BUF_POP();
+				//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
+				//if (recv_buf_tail != recv_buf_head) {
+				//	gb_sin = recv_buf[recv_buf_tail];
+				//} else {
+				//	gb_sin = 0x00;
+				//}
 			}
 		} else {
 			gb_sin <<= 1;
@@ -283,12 +399,17 @@ exti0_isr(void)
 	//gpio_toggle(GPIOA, GPIO5); /* LED on/off */
 }
 
+
 int
 main(void)
 {
+	uint8_t opt;
+
 	mode = 'x';
-	recv_buf_head = 0;
-	recv_buf_tail = 0;
+	slave_mode = 'x';
+	//recv_buf_head = 0;
+	//recv_buf_tail = 0;
+	RECV_BUF_CLEAR();
 
 	clock_setup();
 	gpio_setup();
@@ -307,33 +428,22 @@ main(void)
 	//while (!dma_sent);
 
 	while (1) {
-		mode = usart_recv_blocking(USART2);
-		switch (mode) {
-		case 's':
+		opt = usart_recv_blocking(USART2);
+		switch (opt) {
+		case MODE_SNIFF:
+			mode = MODE_SNIFF;
 			gblink_sniff_gpio_setup();
 			while (1);
 			break;
-		case 'b':
-			// DEBUG START
-			//recv_buf[0] = 0x00;
-			//recv_buf[0] = 0x00;
-			//recv_buf[1] = 0x00;
-			//recv_buf[2] = 0x00;
-			//recv_buf[3] = 0x00;
-			//recv_buf[4] = 0x00;
-			//recv_buf[5] = 0x00;
-			//recv_buf[6] = 0x00;
-			//recv_buf[7] = 0x00;
-			////recv_buf[7] = 0x00;
-			//recv_buf[8] = 0x81;
-			////recv_buf[8] = 0x40;
-			//recv_buf[9] = 0x00;
-			//recv_buf_tail = 0;
-			//recv_buf_head = 10;
-
-			//gb_sin = recv_buf[recv_buf_tail];
-			//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
-			// DEBUG END
+		case SLAVE_PRINTER:
+			mode = MODE_SLAVE;
+			slave_mode = SLAVE_PRINTER;
+			printer_reset_state();
+			gblink_slave_gpio_setup();
+			while (1);
+			break;
+		case MODE_SLAVE:
+			mode = MODE_SLAVE;
 			gblink_slave_gpio_setup();
 			while (1);
 			break;
