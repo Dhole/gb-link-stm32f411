@@ -175,42 +175,52 @@ gblink_slave_gpio_setup(void)
 	usart_enable_rx_interrupt(USART2);
 }
 
+#define BUF_LEN 1024
+
+struct circular_buf {
+	uint8_t buf[BUF_LEN];
+	uint32_t head;
+	uint32_t tail;
+	uint32_t len;
+};
+
 volatile uint8_t mode;
 volatile uint8_t slave_mode;
 
 volatile uint8_t gb_sin, gb_sout;
 volatile uint8_t gb_bit;
 
-#define RECV_BUF_LEN 1024
-uint8_t recv_buf[RECV_BUF_LEN];
-volatile uint32_t recv_buf_head;
-volatile uint32_t recv_buf_tail;
+struct circular_buf recv_buf;
+
+//uint8_t recv_buf[RECV_BUF_LEN];
+//volatile uint32_t recv_buf_head;
+//volatile uint32_t recv_buf_tail;
 
 static inline void
-RECV_BUF_PUSH(uint8_t b) {
-	recv_buf[recv_buf_head] = b;
-	recv_buf_head = (recv_buf_head + 1) % RECV_BUF_LEN;
+buf_push(struct circular_buf *buf, uint8_t b) {
+	buf->buf[buf->head] = b;
+	buf->head = (buf->head + 1) % BUF_LEN;
 }
 
 static inline uint8_t
-RECV_BUF_POP(void)
+buf_pop(struct circular_buf *buf)
 {
-	uint8_t b = recv_buf[recv_buf_tail];
-	recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
+	uint8_t b = buf->buf[buf->tail];
+	buf->tail = (buf->tail + 1) % BUF_LEN;
 	return b;
 }
 
 static inline void
-RECV_BUF_CLEAR(void)
+buf_clear(struct circular_buf *buf)
 {
-	recv_buf_head = 1;
-	recv_buf_tail = 0;
+	buf->head = 0;
+	buf->tail = 0;
 }
 
 static inline int
-RECV_BUF_EMPTY(void)
+buf_empty(struct circular_buf *buf)
 {
-	return (recv_buf_tail == recv_buf_head);
+	return (buf->tail == buf->head);
 }
 
 void
@@ -221,16 +231,16 @@ usart2_isr(void)
 	if (((USART_CR1(USART2) & USART_CR1_RXNEIE) != 0) &&
 	    ((USART_SR(USART2) & USART_SR_RXNE) != 0)) {
 		//empty = recv_buf_tail == recv_buf_head ? 1 : 0;
-		empty = RECV_BUF_EMPTY();
+		empty = buf_empty(&recv_buf);
 
 		//recv_buf[recv_buf_head] = usart_recv(USART2);
 		//recv_buf_head = (recv_buf_head + 1) % RECV_BUF_LEN;
-		RECV_BUF_PUSH(usart_recv(USART2));
+		buf_push(&recv_buf, usart_recv(USART2));
 
 		if (empty && gb_bit == 0 ) {
 			//gb_sin = recv_buf[recv_buf_tail];
 			//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
-			gb_sin = RECV_BUF_POP();
+			gb_sin = buf_pop(&recv_buf);
 		}
 	}
 }
@@ -284,16 +294,15 @@ printer_update_state(uint8_t b)
 		printer_state = CHECKSUM1;
 		break;
 	case CHECKSUM1:
-		RECV_BUF_PUSH(0x81);
+		buf_push(&recv_buf, 0x81);
 		printer_state = ACK;
 		break;
 	case ACK:
-		RECV_BUF_PUSH(0x00);
+		buf_push(&recv_buf, 0x00);
 		printer_state = STATUS;
 		break;
 	case STATUS:
 		printer_state = MAGIC0;
-		gpio_toggle(GPIOA, GPIO5); /* LED on/off */
 		break;
 	}
 }
@@ -353,10 +362,10 @@ exti0_isr_slave(void)
 
 			// Prepare next gb_sin
 			//if (recv_buf_tail == recv_buf_head) {
-			if (RECV_BUF_EMPTY()) {
+			if (buf_empty(&recv_buf)) {
 				gb_sin = 0x00;
 			} else {
-				gb_sin = RECV_BUF_POP();
+				gb_sin = buf_pop(&recv_buf);
 				//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
 				//if (recv_buf_tail != recv_buf_head) {
 				//	gb_sin = recv_buf[recv_buf_tail];
@@ -409,7 +418,7 @@ main(void)
 	slave_mode = 'x';
 	//recv_buf_head = 0;
 	//recv_buf_tail = 0;
-	RECV_BUF_CLEAR();
+	buf_clear(&recv_buf);
 
 	clock_setup();
 	gpio_setup();
