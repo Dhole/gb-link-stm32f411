@@ -6,12 +6,9 @@
 #include <libopencm3/stm32/exti.h>
 #include <libopencm3/cm3/nvic.h>
 
+#include "gb-link.h"
 #include "usart.h"
-
-#define MODE_SNIFF 's'
-#define MODE_SLAVE 'b'
-#define SLAVE_PRINTER 'p'
-
+#include "buffer.h"
 
 /* STM32F411-Nucleo at 96 MHz */
 const struct rcc_clock_scale rcc_hse_8mhz_3v3_96mhz = {
@@ -54,13 +51,13 @@ static void
 gpio_setup(void)
 {
 	/* Setup GPIO pin GPIO5 on GPIO port A for LED. */
-	gpio_mode_setup(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO5);
+	gpio_mode_setup(GPIOP_LED, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPION_LED);
 
 	/* Setup GPIO pins for USART2 transmit. */
-	gpio_mode_setup(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO2 | GPIO3);
+	gpio_mode_setup(GPIOP_USART, GPIO_MODE_AF, GPIO_PUPD_NONE, GPION_USART_TX | GPION_USART_RX);
 
 	/* Setup USART2 TX/RX pin as alternate function. */
-	gpio_set_af(GPIOA, GPIO_AF7, GPIO2 | GPIO3);
+	gpio_set_af(GPIOP_USART, GPIO_AF7, GPION_USART_TX | GPION_USART_RX);
 }
 
 volatile int dma_sent = 0;
@@ -108,18 +105,18 @@ static void
 gblink_sniff_gpio_setup(void)
 {
 	// PA0 -> SCK
-	gpio_mode_setup(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPIO0);
+	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SCK);
 	// PC0 -> SIN
-	gpio_mode_setup(GPIOC, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPIO0);
+	gpio_mode_setup(GPIOP_SIN, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SIN);
 	// PC1 -> SOUT
-	gpio_mode_setup(GPIOC, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPIO1);
+	gpio_mode_setup(GPIOP_SOUT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SOUT);
 	// PC2 -> SD
-	gpio_mode_setup(GPIOC, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPIO2);
+	gpio_mode_setup(GPIOP_SD, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SD);
 
 	nvic_set_priority(NVIC_EXTI0_IRQ, 0);
 	nvic_enable_irq(NVIC_EXTI0_IRQ);
 
-	exti_select_source(EXTI0, GPIOA);
+	exti_select_source(EXTI0, GPIOP_SCK);
 	//exti_set_trigger(EXTI0, EXTI_TRIGGER_FALLING);
 	exti_set_trigger(EXTI0, EXTI_TRIGGER_RISING);
 	exti_enable_request(EXTI0);
@@ -129,39 +126,30 @@ static void
 gblink_slave_gpio_setup(void)
 {
 	// PA0 -> SCK
-	gpio_mode_setup(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPIO0);
+	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SCK);
 	// PC0 -> SIN
-	gpio_mode_setup(GPIOC, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPIO0);
-	gpio_set_output_options(GPIOC, GPIO_OTYPE_PP, GPIO_OSPEED_100MHZ, GPIO0);
-	gpio_clear(GPIOC, GPIO0);
+	gpio_mode_setup(GPIOP_SIN, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SIN);
+	gpio_set_output_options(GPIOP_SIN, GPIO_OTYPE_PP, GPIO_OSPEED_100MHZ, GPION_SIN);
+	gpio_clear(GPIOP_SIN, GPION_SIN);
 	// PC1 -> SOUT
-	gpio_mode_setup(GPIOC, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPIO1);
+	gpio_mode_setup(GPIOP_SOUT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SOUT);
 	// PC2 -> SD
-	//gpio_mode_setup(GPIOC, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPIO2);
-	//gpio_mode_setup(GPIOC, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPIO2);
+	//gpio_mode_setup(GPIOP_SD, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
+	//gpio_mode_setup(GPIOP_SD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
 
-	//gpio_set(GPIOC, GPIO2);
+	//gpio_set(GPIOP_SD, GPION_SD);
 
 	nvic_set_priority(NVIC_EXTI0_IRQ, 0);
 	nvic_enable_irq(NVIC_EXTI0_IRQ);
 	nvic_set_priority(NVIC_USART2_IRQ, 1);
 	nvic_enable_irq(NVIC_USART2_IRQ);
 
-	exti_select_source(EXTI0, GPIOA);
+	exti_select_source(EXTI0, GPIOP_SCK);
 	exti_set_trigger(EXTI0, EXTI_TRIGGER_BOTH);
 	exti_enable_request(EXTI0);
 
 	usart_enable_rx_interrupt(USART2);
 }
-
-#define BUF_LEN 1024
-
-struct circular_buf {
-	uint8_t buf[BUF_LEN];
-	uint32_t head;
-	uint32_t tail;
-	uint32_t len;
-};
 
 volatile uint8_t mode;
 volatile uint8_t slave_mode;
@@ -170,37 +158,6 @@ volatile uint8_t gb_sin, gb_sout;
 volatile uint8_t gb_bit;
 
 struct circular_buf recv_buf;
-
-//uint8_t recv_buf[RECV_BUF_LEN];
-//volatile uint32_t recv_buf_head;
-//volatile uint32_t recv_buf_tail;
-
-static inline void
-buf_push(struct circular_buf *buf, uint8_t b) {
-	buf->buf[buf->head] = b;
-	buf->head = (buf->head + 1) % BUF_LEN;
-}
-
-static inline uint8_t
-buf_pop(struct circular_buf *buf)
-{
-	uint8_t b = buf->buf[buf->tail];
-	buf->tail = (buf->tail + 1) % BUF_LEN;
-	return b;
-}
-
-static inline void
-buf_clear(struct circular_buf *buf)
-{
-	buf->head = 0;
-	buf->tail = 0;
-}
-
-static inline int
-buf_empty(struct circular_buf *buf)
-{
-	return (buf->tail == buf->head);
-}
 
 void
 usart2_isr(void)
@@ -224,7 +181,6 @@ const char printer_magic[] = {0x88, 0x33};
 enum printer_state {MAGIC0, MAGIC1, CMD, ARG0, LEN_LOW, LEN_HIGH, DATA, CHECKSUM0, CHECKSUM1, ACK, STATUS};
 enum printer_state printer_state;
 uint16_t printer_data_len;
-
 
 static void
 printer_update_state(uint8_t b)
@@ -292,8 +248,8 @@ inline static void
 exti0_isr_sniff(void)
 {
 	//delay_nop(1000);
-	gb_sin |= gpio_get(GPIOC, GPIO0) ? 1 : 0;
-	gb_sout |= gpio_get(GPIOC, GPIO1) ? 1 : 0;
+	gb_sin |= gpio_get(GPIOP_SIN, GPION_SIN) ? 1 : 0;
+	gb_sout |= gpio_get(GPIOP_SOUT, GPION_SOUT) ? 1 : 0;
 	gb_bit++;
 
 	if (gb_bit == 8) {
@@ -314,8 +270,8 @@ exti0_isr_sniff(void)
 inline static void
 exti0_isr_slave(void)
 {
-	if (gpio_get(GPIOA, GPIO0) == 0) { // FALLING
-		gb_sout |= gpio_get(GPIOC, GPIO1) ? 1 : 0;
+	if (gpio_get(GPIOP_SCK, GPION_SCK) == 0) { // FALLING
+		gb_sout |= gpio_get(GPIOP_SOUT, GPION_SOUT) ? 1 : 0;
 		gb_bit++;
 
 		if (gb_bit == 8) {
@@ -345,7 +301,7 @@ exti0_isr_slave(void)
 			gb_sout <<= 1;
 		}
 	} else { // RISING
-		(gb_sin & 0x80) ? gpio_set(GPIOC, GPIO0) : gpio_clear(GPIOC, GPIO0);
+		(gb_sin & 0x80) ? gpio_set(GPIOP_SIN, GPION_SIN) : gpio_clear(GPIOP_SIN, GPION_SIN);
 	}
 }
 
@@ -365,7 +321,7 @@ exti0_isr(void)
 		break;
 	}
 
-	//gpio_toggle(GPIOA, GPIO5); /* LED on/off */
+	//gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
 }
 
 
@@ -376,8 +332,6 @@ main(void)
 
 	mode = 'x';
 	slave_mode = 'x';
-	//recv_buf_head = 0;
-	//recv_buf_tail = 0;
 	buf_clear(&recv_buf);
 
 	clock_setup();
@@ -416,9 +370,7 @@ main(void)
 		}
 	}
 
-	while (1) {
-
-	}
+	while (1);
 
 	return 0;
 }
