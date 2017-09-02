@@ -1,24 +1,3 @@
-/*
- * This file is part of the libopencm3 project.
- *
- * Copyright (C) 2009 Uwe Hermann <uwe@hermann-uwe.de>
- * Copyright (C) 2011 Stephen Caudle <scaudle@doceme.com>
- * Copyright (C) 2015 Chuck McManis <cmcmanis@mcmanis.com>
- *
- * This library is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this library.  If not, see <http://www.gnu.org/licenses/>.
- */
-
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/gpio.h>
@@ -230,16 +209,11 @@ usart2_isr(void)
 	/* Check if we were called because of RXNE. */
 	if (((USART_CR1(USART2) & USART_CR1_RXNEIE) != 0) &&
 	    ((USART_SR(USART2) & USART_SR_RXNE) != 0)) {
-		//empty = recv_buf_tail == recv_buf_head ? 1 : 0;
 		empty = buf_empty(&recv_buf);
 
-		//recv_buf[recv_buf_head] = usart_recv(USART2);
-		//recv_buf_head = (recv_buf_head + 1) % RECV_BUF_LEN;
 		buf_push(&recv_buf, usart_recv(USART2));
 
 		if (empty && gb_bit == 0 ) {
-			//gb_sin = recv_buf[recv_buf_tail];
-			//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
 			gb_sin = buf_pop(&recv_buf);
 		}
 	}
@@ -361,17 +335,10 @@ exti0_isr_slave(void)
 			gb_sout = 0;
 
 			// Prepare next gb_sin
-			//if (recv_buf_tail == recv_buf_head) {
 			if (buf_empty(&recv_buf)) {
 				gb_sin = 0x00;
 			} else {
 				gb_sin = buf_pop(&recv_buf);
-				//recv_buf_tail = (recv_buf_tail + 1) % RECV_BUF_LEN;
-				//if (recv_buf_tail != recv_buf_head) {
-				//	gb_sin = recv_buf[recv_buf_tail];
-				//} else {
-				//	gb_sin = 0x00;
-				//}
 			}
 		} else {
 			gb_sin <<= 1;
@@ -379,13 +346,6 @@ exti0_isr_slave(void)
 		}
 	} else { // RISING
 		(gb_sin & 0x80) ? gpio_set(GPIOC, GPIO0) : gpio_clear(GPIOC, GPIO0);
-		//if (gb_sin & 0x80) {
-		//	gpio_set(GPIOC, GPIO0);
-		//	//usart_send_blocking(USART2, 0x01);
-		//} else {
-		//	gpio_clear(GPIOC, GPIO0);
-		//	//usart_send_blocking(USART2, 0x00);
-		//}
 	}
 }
 
@@ -431,11 +391,6 @@ main(void)
 	usart_recv(USART2); // Clear initial garbage
 	usart_send_srt_blocking("\nHELLO\n");
 
-	//usart_recv_dma(buf, LEN);
-	//while (!dma_recvd);
-	//usart_send_dma(buf, LEN);
-	//while (!dma_sent);
-
 	while (1) {
 		opt = usart_recv_blocking(USART2);
 		switch (opt) {
@@ -462,14 +417,7 @@ main(void)
 	}
 
 	while (1) {
-		//gpio_toggle(GPIOA, GPIO5); /* LED on/off */
-		//send_USART_str_blocking("HOLA QUE TAL");
-		//delay_nop(2000);
-		//recv_USART_bytes_blocking(buf, 4);
-		//send_USART_bytes_blocking(buf, 4);
-		//send_USART_bytes_blocking((unsigned char *) "\r\n", 2);
-		//buf[0] = usart_recv_blocking(USART2);
-		//usart_send_blocking(USART2, buf[0]);
+
 	}
 
 	return 0;
