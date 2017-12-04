@@ -4,6 +4,7 @@
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/stm32/dma.h>
 #include <libopencm3/stm32/exti.h>
+#include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 
 #include "gb-link.h"
@@ -141,18 +142,106 @@ gblink_slave_gpio_setup(void)
 
 	nvic_set_priority(NVIC_EXTI0_IRQ, 0);
 	nvic_enable_irq(NVIC_EXTI0_IRQ);
-	nvic_set_priority(NVIC_USART2_IRQ, 1);
-	nvic_enable_irq(NVIC_USART2_IRQ);
+	// Not using this
+	//nvic_set_priority(NVIC_USART2_IRQ, 1);
+	//nvic_enable_irq(NVIC_USART2_IRQ);
 
 	exti_select_source(EXTI0, GPIOP_SCK);
 	exti_set_trigger(EXTI0, EXTI_TRIGGER_BOTH);
 	exti_enable_request(EXTI0);
 
-	usart_enable_rx_interrupt(USART2);
+	// Not using this
+	//usart_enable_rx_interrupt(USART2);
+}
+
+static void
+gblink_master_gpio_setup(void)
+{
+	// PA0 -> SCK
+	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SCK);
+	// PC0 -> SIN
+	gpio_mode_setup(GPIOP_SIN, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SIN);
+	gpio_set_output_options(GPIOP_SIN, GPIO_OTYPE_PP, GPIO_OSPEED_100MHZ, GPION_SIN);
+	gpio_clear(GPIOP_SIN, GPION_SIN);
+	// PC1 -> SOUT
+	gpio_mode_setup(GPIOP_SOUT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SOUT);
+	// PC2 -> SD
+	gpio_mode_setup(GPIOP_SD, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
+	gpio_mode_setup(GPIOP_SD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
+
+	gpio_set(GPIOP_SD, GPION_SD);
+
+	// Not using this
+	//nvic_set_priority(NVIC_USART2_IRQ, 1);
+	//nvic_enable_irq(NVIC_USART2_IRQ);
+
+	//usart_enable_rx_interrupt(USART2);
+}
+
+static void
+tim_setup(uint32_t freq)
+{
+	/* Enable TIM2 clock. */
+	rcc_periph_clock_enable(RCC_TIM2);
+
+	/* Enable TIM2 interrupt. */
+	nvic_enable_irq(NVIC_TIM2_IRQ);
+
+	/* Reset TIM2 peripheral to defaults. */
+	rcc_periph_reset_pulse(RST_TIM2);
+
+	/* Timer global mode:
+	 * - No divider
+	 * - Alignment edge
+	 * - Direction up
+	 * (These are actually default values after reset above, so this call
+	 * is strictly unnecessary, but demos the api for alternative settings)
+	 */
+	timer_set_mode(TIM2, TIM_CR1_CKD_CK_INT,
+		TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
+
+	/*
+	 * Please take note that the clock source for STM32 timers
+	 * might not be the raw APB1/APB2 clocks.  In various conditions they
+	 * are doubled.  See the Reference Manual for full details!
+	 * In our case, TIM2 on APB1 is running at double frequency, so this
+	 * sets the prescaler to have the timer run at 5kHz
+	 */
+	/* Set the prescaler to run at 1MHz */
+	timer_set_prescaler(TIM2, ((rcc_apb1_frequency * 2) / 1000000) - 1);
+
+	/* Set the initual output compare value for OC1. */
+	timer_set_oc_value(TIM2, TIM_OC1, 0);
+
+	/* Disable preload. */
+	timer_disable_preload(TIM2);
+	timer_continuous_mode(TIM2);
+
+	/* count full range, as we'll update compare value continuously */
+	//timer_set_period(TIM2, 8 - 1);
+	timer_set_period(TIM2, (1000000 / freq) - 1);
+}
+
+static inline void
+tim_start(void)
+{
+	/* Counter enable. */
+	timer_enable_counter(TIM2);
+
+	/* Enable Channel 1 compare interrupt to recalculate compare values */
+	timer_enable_irq(TIM2, TIM_DIER_CC1IE);
+}
+
+static inline void
+tim_stop(void)
+{
+	timer_disable_counter(TIM2);
+	timer_disable_irq(TIM2, TIM_DIER_CC1IE);
 }
 
 volatile uint8_t mode;
 volatile uint8_t slave_mode;
+volatile uint8_t master_mode;
 
 volatile uint8_t gb_sin, gb_sout;
 volatile uint8_t gb_bit;
@@ -183,7 +272,7 @@ enum printer_state printer_state;
 uint16_t printer_data_len;
 
 static void
-printer_update_state(uint8_t b)
+printer_state_update(uint8_t b)
 {
 	switch (printer_state) {
 	case MAGIC0:
@@ -224,11 +313,9 @@ printer_update_state(uint8_t b)
 		printer_state = CHECKSUM1;
 		break;
 	case CHECKSUM1:
-		buf_push(&recv_buf, 0x81);
 		printer_state = ACK;
 		break;
 	case ACK:
-		buf_push(&recv_buf, 0x00);
 		printer_state = STATUS;
 		break;
 	case STATUS:
@@ -238,7 +325,7 @@ printer_update_state(uint8_t b)
 }
 
 static void
-printer_reset_state(void)
+printer_state_reset(void)
 {
 	printer_data_len = 0;
 	printer_state = MAGIC0;
@@ -247,6 +334,7 @@ printer_reset_state(void)
 inline static void
 exti0_isr_sniff(void)
 {
+	// RISING
 	//delay_nop(1000);
 	gb_sin |= gpio_get(GPIOP_SIN, GPION_SIN) ? 1 : 0;
 	gb_sout |= gpio_get(GPIOP_SOUT, GPION_SOUT) ? 1 : 0;
@@ -278,9 +366,19 @@ exti0_isr_slave(void)
 			// Send gb_sin and gb_sout over USART2
 			usart_send_blocking(USART2, gb_sout);
 
-			switch(slave_mode) {
+			switch (slave_mode) {
 			case SLAVE_PRINTER:
-				printer_update_state(gb_sout);
+				printer_state_update(gb_sout);
+				switch (printer_state) {
+				case ACK:
+					buf_push(&recv_buf, 0x81);
+					break;
+				case STATUS:
+					buf_push(&recv_buf, 0x00);
+					break;
+				default:
+					break;
+				}
 				break;
 			default:
 				break;
@@ -310,11 +408,12 @@ exti0_isr(void)
 {
 	// NOTE: If this goes at the end of the function, things no longer work!
 	exti_reset_request(EXTI0);
+
 	switch (mode) {
-	case 's':
+	case MODE_SNIFF:
 		exti0_isr_sniff();
 		break;
-	case 'b':
+	case MODE_SLAVE:
 		exti0_isr_slave();
 		break;
 	default:
@@ -324,14 +423,120 @@ exti0_isr(void)
 	//gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
 }
 
+uint8_t high;
+uint8_t stop;
+
+void
+tim2_isr(void)
+{
+	if (timer_get_flag(TIM2, TIM_SR_CC1IF)) {
+		if (high) { // FALLING
+			(gb_sin & 0x80) ? gpio_set(GPIOP_SIN, GPION_SIN) : gpio_clear(GPIOP_SIN, GPION_SIN);
+			//usart_send_blocking(USART2, (gb_sin & 0x80) ? 1 : 0);
+			//usart_send_blocking(USART2, gb_bit);
+
+			gpio_clear(GPIOP_SCK, GPION_SCK);
+		} else { // RISING
+
+			if (gb_bit == 0) {
+				switch (master_mode) {
+				case MASTER_PRINTER:
+					//usart_send_blocking(USART2, gb_sin);
+					printer_state_update(gb_sin);
+				}
+			}
+
+			gb_sout |= gpio_get(GPIOP_SOUT, GPION_SOUT) ? 1 : 0;
+			gb_bit++;
+
+			if (gb_bit == 8) {
+				usart_send_blocking(USART2, gb_sout);
+				switch (master_mode) {
+				case MASTER_PRINTER:
+					switch (printer_state) {
+					case ACK:
+						//usart_send_blocking(USART2, gb_sout);
+						break;
+					case STATUS:
+						//usart_send_blocking(USART2, gb_sout);
+						break;
+					default:
+						break;
+					}
+					break;
+				}
+
+				// Reset state
+				gb_bit = 0;
+				gb_sout = 0;
+
+				// Prepare next gb_sin
+				if (buf_empty(&recv_buf)) {
+					gb_sin = 0x00;
+					stop = 1;
+				} else {
+					gb_sin = buf_pop(&recv_buf);
+				}
+			} else {
+				gb_sin <<= 1;
+				gb_sout <<= 1;
+			}
+
+			if (stop) {
+				tim_stop();
+				gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
+			}
+
+			gpio_set(GPIOP_SCK, GPION_SCK);
+		}
+		high = !high;
+
+		/* Clear compare interrupt flag. */
+		timer_clear_flag(TIM2, TIM_SR_CC1IF);
+	}
+}
+
+static void
+mode_master_printer(void)
+{
+	uint8_t len_low, len_high;
+	uint16_t len;
+	unsigned int i;
+
+	gpio_set(GPIOP_SCK, GPION_SCK);
+	high = 1;
+
+	// Block until we get confirmation that the printer has ben turned on
+	usart_recv_blocking(USART2);
+
+	len_low = usart_recv_blocking(USART2);
+	len_high = usart_recv_blocking(USART2);
+	len = len_low | ((uint16_t) len_high) << 8;
+
+	buf_clear(&recv_buf);
+	for (i = 0; i < len; i++) {
+		buf_push(&recv_buf, usart_recv_blocking(USART2));
+	}
+
+	gb_bit = 0;
+	gb_sout = 0;
+	stop = 0;
+
+	// Prepare fist byte
+	gb_sin = buf_pop(&recv_buf);
+	// Set first bit of first byte
+	(gb_sin & 0x80) ? gpio_set(GPIOP_SIN, GPION_SIN) : gpio_clear(GPIOP_SIN, GPION_SIN);
+
+	tim_start();
+}
 
 int
 main(void)
 {
 	uint8_t opt;
 
-	mode = 'x';
-	slave_mode = 'x';
+	mode = UNSET;
+	slave_mode = UNSET;
 	buf_clear(&recv_buf);
 
 	clock_setup();
@@ -356,9 +561,20 @@ main(void)
 		case SLAVE_PRINTER:
 			mode = MODE_SLAVE;
 			slave_mode = SLAVE_PRINTER;
-			printer_reset_state();
+			printer_state_reset();
 			gblink_slave_gpio_setup();
 			while (1);
+			break;
+		case MASTER_PRINTER:
+			mode = MODE_MASTER;
+			master_mode = MASTER_PRINTER;
+			printer_state_reset();
+			gblink_master_gpio_setup();
+			//tim_setup(2 * 8192);
+			tim_setup(2 * 100);
+			while (1) {
+				mode_master_printer();
+			}
 			break;
 		case MODE_SLAVE:
 			mode = MODE_SLAVE;

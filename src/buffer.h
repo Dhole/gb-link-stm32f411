@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define BUF_LEN 1024
+#define BUF_LEN 2048
 
 struct circular_buf {
 	uint8_t buf[BUF_LEN];
