@@ -158,16 +158,16 @@ static void
 gblink_master_gpio_setup(void)
 {
 	// PA0 -> SCK
-	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SCK);
+	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLUP, GPION_SCK);
 	// PC0 -> SIN
-	gpio_mode_setup(GPIOP_SIN, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SIN);
-	gpio_set_output_options(GPIOP_SIN, GPIO_OTYPE_PP, GPIO_OSPEED_100MHZ, GPION_SIN);
-	gpio_clear(GPIOP_SIN, GPION_SIN);
+	gpio_mode_setup(GPIOP_SIN, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPION_SIN);
 	// PC1 -> SOUT
-	gpio_mode_setup(GPIOP_SOUT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, GPION_SOUT);
+	gpio_mode_setup(GPIOP_SOUT, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SOUT);
+	gpio_set_output_options(GPIOP_SOUT, GPIO_OTYPE_PP, GPIO_OSPEED_100MHZ, GPION_SOUT);
+	gpio_clear(GPIOP_SOUT, GPION_SOUT);
 	// PC2 -> SD
 	gpio_mode_setup(GPIOP_SD, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
-	gpio_mode_setup(GPIOP_SD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
+	//gpio_mode_setup(GPIOP_SD, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, GPION_SD);
 
 	gpio_set(GPIOP_SD, GPION_SD);
 
@@ -431,8 +431,8 @@ tim2_isr(void)
 {
 	if (timer_get_flag(TIM2, TIM_SR_CC1IF)) {
 		if (high) { // FALLING
-			(gb_sin & 0x80) ? gpio_set(GPIOP_SIN, GPION_SIN) : gpio_clear(GPIOP_SIN, GPION_SIN);
-			//usart_send_blocking(USART2, (gb_sin & 0x80) ? 1 : 0);
+			(gb_sout & 0x80) ? gpio_set(GPIOP_SOUT, GPION_SOUT) : gpio_clear(GPIOP_SOUT, GPION_SOUT);
+			//usart_send_blocking(USART2, (gb_sout & 0x80) ? 1 : 0);
 			//usart_send_blocking(USART2, gb_bit);
 
 			gpio_clear(GPIOP_SCK, GPION_SCK);
@@ -441,24 +441,24 @@ tim2_isr(void)
 			if (gb_bit == 0) {
 				switch (master_mode) {
 				case MASTER_PRINTER:
-					//usart_send_blocking(USART2, gb_sin);
-					printer_state_update(gb_sin);
+					//usart_send_blocking(USART2, gb_sout);
+					printer_state_update(gb_sout);
 				}
 			}
 
-			gb_sout |= gpio_get(GPIOP_SOUT, GPION_SOUT) ? 1 : 0;
+			gb_sin |= gpio_get(GPIOP_SIN, GPION_SIN) ? 1 : 0;
 			gb_bit++;
 
 			if (gb_bit == 8) {
-				usart_send_blocking(USART2, gb_sout);
+				usart_send_blocking(USART2, gb_sin);
 				switch (master_mode) {
 				case MASTER_PRINTER:
 					switch (printer_state) {
 					case ACK:
-						//usart_send_blocking(USART2, gb_sout);
+						//usart_send_blocking(USART2, gb_sin);
 						break;
 					case STATUS:
-						//usart_send_blocking(USART2, gb_sout);
+						//usart_send_blocking(USART2, gb_sin);
 						break;
 					default:
 						break;
@@ -468,18 +468,18 @@ tim2_isr(void)
 
 				// Reset state
 				gb_bit = 0;
-				gb_sout = 0;
+				gb_sin = 0;
 
-				// Prepare next gb_sin
+				// Prepare next gb_sout
 				if (buf_empty(&recv_buf)) {
-					gb_sin = 0x00;
+					gb_sout = 0x00;
 					stop = 1;
 				} else {
-					gb_sin = buf_pop(&recv_buf);
+					gb_sout = buf_pop(&recv_buf);
 				}
 			} else {
-				gb_sin <<= 1;
 				gb_sout <<= 1;
+				gb_sin <<= 1;
 			}
 
 			if (stop) {
@@ -519,13 +519,13 @@ mode_master_printer(void)
 	}
 
 	gb_bit = 0;
-	gb_sout = 0;
+	gb_sin = 0;
 	stop = 0;
 
 	// Prepare fist byte
-	gb_sin = buf_pop(&recv_buf);
+	gb_sout = buf_pop(&recv_buf);
 	// Set first bit of first byte
-	(gb_sin & 0x80) ? gpio_set(GPIOP_SIN, GPION_SIN) : gpio_clear(GPIOP_SIN, GPION_SIN);
+	//(gb_sout & 0x80) ? gpio_set(GPIOP_SOUT, GPION_SOUT) : gpio_clear(GPIOP_SOUT, GPION_SOUT);
 
 	tim_start();
 }
@@ -571,7 +571,7 @@ main(void)
 			printer_state_reset();
 			gblink_master_gpio_setup();
 			//tim_setup(2 * 8192);
-			tim_setup(2 * 100);
+			tim_setup(2 * 200);
 			while (1) {
 				mode_master_printer();
 			}
