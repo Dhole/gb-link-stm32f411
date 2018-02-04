@@ -158,8 +158,12 @@ static void
 gblink_master_gpio_setup(void)
 {
 	// PA0 -> SCK
-	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLUP, GPION_SCK);
+	gpio_mode_setup(GPIOP_SCK, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SCK);
 	// PC0 -> SIN
+	// NOTE: The gameboy printer signals 0 by connecting to ground and 1 by
+	// floating.  This means that a pullup resistor is required to read the
+	// 1.  Either connect a pullup resistor to the pin (for example
+	// 15KOhm), or set GPIO_PUPD_PULLUP as in the following line.
 	gpio_mode_setup(GPIOP_SIN, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPION_SIN);
 	// PC1 -> SOUT
 	gpio_mode_setup(GPIOP_SOUT, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLDOWN, GPION_SOUT);
@@ -269,11 +273,13 @@ const char printer_magic[] = {0x88, 0x33};
 
 enum printer_state {MAGIC0, MAGIC1, CMD, ARG0, LEN_LOW, LEN_HIGH, DATA, CHECKSUM0, CHECKSUM1, ACK, STATUS};
 enum printer_state printer_state;
+enum printer_state printer_state_prev;
 uint16_t printer_data_len;
 
 static void
 printer_state_update(uint8_t b)
 {
+	printer_state_prev = printer_state;
 	switch (printer_state) {
 	case MAGIC0:
 		if (b == printer_magic[0]) {
@@ -434,10 +440,6 @@ tim2_isr(void)
 			(gb_sout & 0x80) ? gpio_set(GPIOP_SOUT, GPION_SOUT) : gpio_clear(GPIOP_SOUT, GPION_SOUT);
 			//usart_send_blocking(USART2, (gb_sout & 0x80) ? 1 : 0);
 			//usart_send_blocking(USART2, gb_bit);
-
-			gpio_clear(GPIOP_SCK, GPION_SCK);
-		} else { // RISING
-
 			if (gb_bit == 0) {
 				switch (master_mode) {
 				case MASTER_PRINTER:
@@ -446,19 +448,22 @@ tim2_isr(void)
 				}
 			}
 
+			gpio_clear(GPIOP_SCK, GPION_SCK);
+		} else { // RISING
+
 			gb_sin |= gpio_get(GPIOP_SIN, GPION_SIN) ? 1 : 0;
 			gb_bit++;
 
 			if (gb_bit == 8) {
-				usart_send_blocking(USART2, gb_sin);
+				//usart_send_blocking(USART2, gb_sin);
 				switch (master_mode) {
 				case MASTER_PRINTER:
-					switch (printer_state) {
+					switch (printer_state_prev) {
 					case ACK:
-						//usart_send_blocking(USART2, gb_sin);
+						usart_send_blocking(USART2, gb_sin);
 						break;
 					case STATUS:
-						//usart_send_blocking(USART2, gb_sin);
+						usart_send_blocking(USART2, gb_sin);
 						break;
 					default:
 						break;
@@ -509,25 +514,29 @@ mode_master_printer(void)
 	// Block until we get confirmation that the printer has ben turned on
 	usart_recv_blocking(USART2);
 
-	len_low = usart_recv_blocking(USART2);
-	len_high = usart_recv_blocking(USART2);
-	len = len_low | ((uint16_t) len_high) << 8;
+	while (1) {
+		gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
+		len_low = usart_recv_blocking(USART2);
+		len_high = usart_recv_blocking(USART2);
+		len = len_low | ((uint16_t) len_high) << 8;
 
-	buf_clear(&recv_buf);
-	for (i = 0; i < len; i++) {
-		buf_push(&recv_buf, usart_recv_blocking(USART2));
+		buf_clear(&recv_buf);
+		for (i = 0; i < len; i++) {
+			buf_push(&recv_buf, usart_recv_blocking(USART2));
+		}
+		gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
+
+		gb_bit = 0;
+		gb_sin = 0;
+		stop = 0;
+
+		// Prepare fist byte
+		gb_sout = buf_pop(&recv_buf);
+		// Set first bit of first byte
+		//(gb_sout & 0x80) ? gpio_set(GPIOP_SOUT, GPION_SOUT) : gpio_clear(GPIOP_SOUT, GPION_SOUT);
+
+		tim_start();
 	}
-
-	gb_bit = 0;
-	gb_sin = 0;
-	stop = 0;
-
-	// Prepare fist byte
-	gb_sout = buf_pop(&recv_buf);
-	// Set first bit of first byte
-	//(gb_sout & 0x80) ? gpio_set(GPIOP_SOUT, GPION_SOUT) : gpio_clear(GPIOP_SOUT, GPION_SOUT);
-
-	tim_start();
 }
 
 int
@@ -570,8 +579,8 @@ main(void)
 			master_mode = MASTER_PRINTER;
 			printer_state_reset();
 			gblink_master_gpio_setup();
-			//tim_setup(2 * 8192);
-			tim_setup(2 * 200);
+			tim_setup(2 * 8192);
+			//tim_setup(2 * 1000);
 			while (1) {
 				mode_master_printer();
 			}
