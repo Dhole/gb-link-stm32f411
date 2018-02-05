@@ -489,7 +489,7 @@ tim2_isr(void)
 
 			if (stop) {
 				tim_stop();
-				gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
+				gpio_clear(GPIOP_LED, GPION_LED); /* LED off */
 			}
 
 			gpio_set(GPIOP_SCK, GPION_SCK);
@@ -524,7 +524,7 @@ mode_master_printer(void)
 		for (i = 0; i < len; i++) {
 			buf_push(&recv_buf, usart_recv_blocking(USART2));
 		}
-		gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
+		gpio_set(GPIOP_LED, GPION_LED); /* LED on */
 
 		gb_bit = 0;
 		gb_sin = 0;
