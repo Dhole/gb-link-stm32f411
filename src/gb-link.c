@@ -45,7 +45,7 @@ clock_setup(void)
 	rcc_periph_clock_enable(RCC_USART2);
 
 	/* Enable DMA1 clock */
-	rcc_periph_clock_enable(RCC_DMA1);
+	//rcc_periph_clock_enable(RCC_DMA1);
 }
 
 static void
@@ -61,37 +61,37 @@ gpio_setup(void)
 	gpio_set_af(GPIOP_USART, GPIO_AF7, GPION_USART_TX | GPION_USART_RX);
 }
 
-volatile int dma_sent = 0;
-
-void
-dma1_stream6_isr(void)
-{
-	if (dma_get_interrupt_flag(DMA1, DMA_STREAM6, DMA_TCIF)) {
-	        // Clear Transfer Complete Interrupt Flag
-		dma_clear_interrupt_flags(DMA1, DMA_STREAM6, DMA_TCIF);
-		dma_sent = 1;
-	}
-
-	dma_disable_transfer_complete_interrupt(DMA1, DMA_STREAM6);
-	usart_disable_tx_dma(USART2);
-	dma_disable_stream(DMA1, DMA_STREAM6);
-}
-
-volatile int dma_recvd = 0;
-
-void
-dma1_stream5_isr(void)
-{
-	if (dma_get_interrupt_flag(DMA1, DMA_STREAM5, DMA_TCIF)) {
-	        // Clear Transfer Complete Interrupt Flag
-		dma_clear_interrupt_flags(DMA1, DMA_STREAM5, DMA_TCIF);
-		dma_recvd = 1;
-	}
-
-	dma_disable_transfer_complete_interrupt(DMA1, DMA_STREAM5);
-	usart_disable_rx_dma(USART2);
-	dma_disable_stream(DMA1, DMA_STREAM5);
-}
+//volatile int dma_sent = 0;
+//
+//void
+//dma1_stream6_isr(void)
+//{
+//	if (dma_get_interrupt_flag(DMA1, DMA_STREAM6, DMA_TCIF)) {
+//	        // Clear Transfer Complete Interrupt Flag
+//		dma_clear_interrupt_flags(DMA1, DMA_STREAM6, DMA_TCIF);
+//		dma_sent = 1;
+//	}
+//
+//	dma_disable_transfer_complete_interrupt(DMA1, DMA_STREAM6);
+//	usart_disable_tx_dma(USART2);
+//	dma_disable_stream(DMA1, DMA_STREAM6);
+//}
+//
+//volatile int dma_recvd = 0;
+//
+//void
+//dma1_stream5_isr(void)
+//{
+//	if (dma_get_interrupt_flag(DMA1, DMA_STREAM5, DMA_TCIF)) {
+//	        // Clear Transfer Complete Interrupt Flag
+//		dma_clear_interrupt_flags(DMA1, DMA_STREAM5, DMA_TCIF);
+//		dma_recvd = 1;
+//	}
+//
+//	dma_disable_transfer_complete_interrupt(DMA1, DMA_STREAM5);
+//	usart_disable_rx_dma(USART2);
+//	dma_disable_stream(DMA1, DMA_STREAM5);
+//}
 
 static inline void
 delay_nop(unsigned int t)
@@ -255,15 +255,12 @@ struct circular_buf recv_buf;
 void
 usart2_isr(void)
 {
-	uint8_t empty;
 	/* Check if we were called because of RXNE. */
 	if (((USART_CR1(USART2) & USART_CR1_RXNEIE) != 0) &&
 	    ((USART_SR(USART2) & USART_SR_RXNE) != 0)) {
-		empty = buf_empty(&recv_buf);
-
 		buf_push(&recv_buf, usart_recv(USART2));
 
-		if (empty && gb_bit == 0 ) {
+		if ((recv_buf.len == 1) && (gb_bit == 0)) {
 			gb_sin = buf_pop(&recv_buf);
 		}
 	}
@@ -335,6 +332,7 @@ printer_state_reset(void)
 {
 	printer_data_len = 0;
 	printer_state = MAGIC0;
+	printer_state_prev = printer_state;
 }
 
 inline static void
@@ -348,8 +346,8 @@ exti0_isr_sniff(void)
 
 	if (gb_bit == 8) {
 		// Send gb_sin and gb_sout over USART2
-		usart_send_blocking(USART2, gb_sin);
 		usart_send_blocking(USART2, gb_sout);
+		usart_send_blocking(USART2, gb_sin);
 
 		// Reset state
 		gb_bit = 0;
@@ -373,7 +371,7 @@ exti0_isr_slave(void)
 			usart_send_blocking(USART2, gb_sout);
 
 			switch (slave_mode) {
-			case SLAVE_PRINTER:
+			case PRINTER_SLAVE:
 				printer_state_update(gb_sout);
 				switch (printer_state) {
 				case ACK:
@@ -442,7 +440,7 @@ tim2_isr(void)
 			//usart_send_blocking(USART2, gb_bit);
 			if (gb_bit == 0) {
 				switch (master_mode) {
-				case MASTER_PRINTER:
+				case PRINTER_MASTER:
 					//usart_send_blocking(USART2, gb_sout);
 					printer_state_update(gb_sout);
 				}
@@ -457,7 +455,7 @@ tim2_isr(void)
 			if (gb_bit == 8) {
 				//usart_send_blocking(USART2, gb_sin);
 				switch (master_mode) {
-				case MASTER_PRINTER:
+				case PRINTER_MASTER:
 					switch (printer_state_prev) {
 					case ACK:
 						usart_send_blocking(USART2, gb_sin);
@@ -515,7 +513,6 @@ mode_master_printer(void)
 	usart_recv_blocking(USART2);
 
 	while (1) {
-		gpio_toggle(GPIOP_LED, GPION_LED); /* LED on/off */
 		len_low = usart_recv_blocking(USART2);
 		len_high = usart_recv_blocking(USART2);
 		len = len_low | ((uint16_t) len_high) << 8;
@@ -532,8 +529,6 @@ mode_master_printer(void)
 
 		// Prepare fist byte
 		gb_sout = buf_pop(&recv_buf);
-		// Set first bit of first byte
-		//(gb_sout & 0x80) ? gpio_set(GPIOP_SOUT, GPION_SOUT) : gpio_clear(GPIOP_SOUT, GPION_SOUT);
 
 		tim_start();
 	}
@@ -553,8 +548,8 @@ main(void)
 	//usart_setup(115200);
 	//usart_setup(1152000);
 	usart_setup(1000000);
-	usart_send_dma_setup();
-	usart_recv_dma_setup();
+	//usart_send_dma_setup();
+	//usart_recv_dma_setup();
 
 	usart_recv(USART2); // Clear initial garbage
 	usart_send_srt_blocking("\nHELLO\n");
@@ -567,23 +562,21 @@ main(void)
 			gblink_sniff_gpio_setup();
 			while (1);
 			break;
-		case SLAVE_PRINTER:
+		case PRINTER_SLAVE:
 			mode = MODE_SLAVE;
-			slave_mode = SLAVE_PRINTER;
+			slave_mode = PRINTER_SLAVE;
 			printer_state_reset();
 			gblink_slave_gpio_setup();
 			while (1);
 			break;
-		case MASTER_PRINTER:
+		case PRINTER_MASTER:
 			mode = MODE_MASTER;
-			master_mode = MASTER_PRINTER;
+			master_mode = PRINTER_MASTER;
 			printer_state_reset();
 			gblink_master_gpio_setup();
 			tim_setup(2 * 8192);
 			//tim_setup(2 * 1000);
-			while (1) {
-				mode_master_printer();
-			}
+			mode_master_printer();
 			break;
 		case MODE_SLAVE:
 			mode = MODE_SLAVE;
